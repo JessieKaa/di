@@ -351,6 +351,9 @@ func attach(sock string) error {
 	case <-done:
 		return nil
 	case err := <-inputErr:
+		if err == nil {
+			clearLocalScreen()
+		}
 		return err
 	}
 }
@@ -505,6 +508,10 @@ func makeRaw(fd int) (*term.State, error) {
 func restoreTerm(fd int, state *term.State) {
 	_ = term.Restore(fd, state)
 	fmt.Print("\x1b[?25h\x1b[0m")
+}
+
+func clearLocalScreen() {
+	fmt.Print("\x1b[H\x1b[2J")
 }
 
 func sendWindowSize(w io.Writer) error {
