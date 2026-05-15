@@ -8,7 +8,7 @@
 d codex --yolo
 ```
 
-按 `Ctrl-B` 断开后，命令仍在后台运行。之后可以用：
+按 `Ctrl-]` 断开后，命令仍在后台运行。之后可以用：
 
 ```sh
 di
@@ -65,7 +65,7 @@ d codex --yolo
 断开当前 attach：
 
 ```text
-Ctrl-B
+Ctrl-]
 ```
 
 如果想临时换 detach 快捷键，可以设置 `D_DETACH`：

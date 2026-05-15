@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	defaultDetachKey = "^B"
+	defaultDetachKey = "^]"
 	frameInput       = 'i'
 	frameResize      = 'w'
 	frameDetachAll   = 'D'
@@ -509,7 +509,7 @@ func makeRaw(fd int) (*term.State, error) {
 
 func restoreTerm(fd int, state *term.State) {
 	_ = term.Restore(fd, state)
-	fmt.Print("\x1b[?25h")
+	fmt.Print("\x1b[?25h\x1b[0m\r\x1b[2K\n")
 }
 
 func sendWindowSize(w io.Writer) error {
