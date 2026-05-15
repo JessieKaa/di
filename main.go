@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,13 @@ const (
 	frameResize      = 'w'
 	frameDetachAll   = 'D'
 )
+
+type sessionMeta struct {
+	Name      string   `json:"name"`
+	Command   []string `json:"command"`
+	PWD       string   `json:"pwd"`
+	StartedAt string   `json:"started_at"`
+}
 
 func main() {
 	var err error
@@ -59,7 +67,7 @@ func runD(args []string) error {
 	}
 	switch args[0] {
 	case "--list":
-		return listSessions(dir)
+		return listSessions()
 	case "--detach":
 		if len(args) < 2 {
 			return errors.New("usage: d --detach <name>")
@@ -70,14 +78,16 @@ func runD(args []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	sock := filepath.Join(dir, labelFor(args)+".sock")
-	if isSocket(sock) {
-		return attach(sock)
+	sock := uniqueSocketPath(dir, labelFor(args))
+	if err := writeSessionMeta(sock, args); err != nil {
+		return err
 	}
 	if err := startServer(sock, args); err != nil {
+		_ = os.Remove(metaPath(sock))
 		return err
 	}
 	if err := waitSocket(sock, 2*time.Second); err != nil {
+		_ = os.Remove(metaPath(sock))
 		return err
 	}
 	return attach(sock)
@@ -178,19 +188,23 @@ func pickAndAttach() error {
 	if _, err := exec.LookPath("fzf"); err != nil {
 		return errors.New("di: fzf is not installed")
 	}
-	socks, err := allSockets()
+	sessions, err := allSessions()
 	if err != nil {
 		return err
 	}
-	if len(socks) == 0 {
+	if len(sessions) == 0 {
 		return errors.New("di: no sessions found")
 	}
-	cmd := exec.Command("fzf", "--prompt=di> ", "--height=40%", "--reverse")
+	lines := make([]string, 0, len(sessions))
+	for _, session := range sessions {
+		lines = append(lines, session.displayLine())
+	}
+	cmd := exec.Command("fzf", "--prompt=di> ", "--height=40%", "--reverse", "--delimiter=\t", "--with-nth=2..")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
 	}
-	go copyLines(stdin, socks)
+	go copyLines(stdin, lines)
 	out, err := cmd.Output()
 	if err != nil {
 		return err
@@ -199,7 +213,11 @@ func pickAndAttach() error {
 	if selected == "" {
 		return nil
 	}
-	return attach(selected)
+	fields := strings.Split(selected, "\t")
+	if len(fields) == 0 || fields[0] == "" {
+		return nil
+	}
+	return attach(fields[0])
 }
 
 func sessionDir() (string, error) {
@@ -213,7 +231,28 @@ func sessionDir() (string, error) {
 	return filepath.Join(home, ".local", "state", "di"), nil
 }
 
-func allSockets() ([]string, error) {
+type sessionInfo struct {
+	Sock string
+	Meta sessionMeta
+}
+
+func (s sessionInfo) displayLine() string {
+	name := s.Meta.Name
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(s.Sock), ".sock")
+	}
+	pwd := s.Meta.PWD
+	if pwd == "" {
+		pwd = "-"
+	}
+	cmd := strings.Join(s.Meta.Command, " ")
+	if cmd == "" {
+		cmd = name
+	}
+	return fmt.Sprintf("%s\t%-32s\t%-56s\t%s", s.Sock, name, pwd, cmd)
+}
+
+func allSessions() ([]sessionInfo, error) {
 	dir, err := sessionDir()
 	if err != nil {
 		return nil, err
@@ -225,29 +264,28 @@ func allSockets() ([]string, error) {
 		}
 		return nil, err
 	}
-	var socks []string
+	var sessions []sessionInfo
 	for _, e := range entries {
 		path := filepath.Join(dir, e.Name())
 		if strings.HasSuffix(e.Name(), ".sock") && isSocket(path) {
-			socks = append(socks, path)
+			sessions = append(sessions, sessionInfo{Sock: path, Meta: readSessionMeta(path)})
 		}
 	}
-	return socks, nil
+	return sessions, nil
 }
 
-func listSessions(dir string) error {
-	entries, err := os.ReadDir(dir)
+func listSessions() error {
+	sessions, err := allSessions()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
-	for _, e := range entries {
-		path := filepath.Join(dir, e.Name())
-		if strings.HasSuffix(e.Name(), ".sock") && isSocket(path) {
-			fmt.Println(strings.TrimSuffix(e.Name(), ".sock"))
+	for _, session := range sessions {
+		meta := session.Meta
+		name := meta.Name
+		if name == "" {
+			name = strings.TrimSuffix(filepath.Base(session.Sock), ".sock")
 		}
+		fmt.Printf("%-32s\t%-56s\t%s\n", name, meta.PWD, strings.Join(meta.Command, " "))
 	}
 	return nil
 }
@@ -260,6 +298,54 @@ func labelFor(args []string) string {
 		return "session"
 	}
 	return label
+}
+
+func uniqueSocketPath(dir, base string) string {
+	if base == "" {
+		base = "session"
+	}
+	for i := 0; ; i++ {
+		name := fmt.Sprintf("%s-%d-%d", base, time.Now().UnixNano(), os.Getpid())
+		if i > 0 {
+			name = fmt.Sprintf("%s-%d-%d-%d", base, time.Now().UnixNano(), os.Getpid(), i)
+		}
+		path := filepath.Join(dir, name+".sock")
+		if !isSocket(path) {
+			return path
+		}
+	}
+}
+
+func metaPath(sock string) string {
+	return strings.TrimSuffix(sock, ".sock") + ".json"
+}
+
+func writeSessionMeta(sock string, args []string) error {
+	pwd, _ := os.Getwd()
+	meta := sessionMeta{
+		Name:      strings.TrimSuffix(filepath.Base(sock), ".sock"),
+		Command:   append([]string(nil), args...),
+		PWD:       pwd,
+		StartedAt: time.Now().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(metaPath(sock), data, 0o600)
+}
+
+func readSessionMeta(sock string) sessionMeta {
+	var meta sessionMeta
+	data, err := os.ReadFile(metaPath(sock))
+	if err != nil {
+		meta.Name = strings.TrimSuffix(filepath.Base(sock), ".sock")
+		return meta
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		meta.Name = strings.TrimSuffix(filepath.Base(sock), ".sock")
+	}
+	return meta
 }
 
 func isSocket(path string) bool {
@@ -374,6 +460,7 @@ func runServer(args []string) error {
 		return err
 	}
 	defer os.Remove(sock)
+	defer os.Remove(metaPath(sock))
 	defer ln.Close()
 
 	master, slave, err := openPTY()
