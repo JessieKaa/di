@@ -17,7 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/creack/pty"
+	"golang.org/x/term"
 )
 
 const (
@@ -488,7 +489,7 @@ func (s *ptyServer) handle(conn net.Conn) {
 			if len(payload) == 8 {
 				rows := binary.BigEndian.Uint32(payload[:4])
 				cols := binary.BigEndian.Uint32(payload[4:])
-				_ = unix.IoctlSetWinsize(int(s.master.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: uint16(rows), Col: uint16(cols)})
+				_ = pty.Setsize(s.master, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 				_, _ = s.master.Write([]byte{'\f'})
 			}
 		case frameDetachAll:
@@ -499,59 +500,26 @@ func (s *ptyServer) handle(conn net.Conn) {
 }
 
 func openPTY() (*os.File, *os.File, error) {
-	masterFD, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := unix.IoctlSetPointerInt(masterFD, unix.TIOCSPTLCK, 0); err != nil {
-		_ = unix.Close(masterFD)
-		return nil, nil, err
-	}
-	n, err := unix.IoctlGetInt(masterFD, unix.TIOCGPTN)
-	if err != nil {
-		_ = unix.Close(masterFD)
-		return nil, nil, err
-	}
-	slaveFD, err := unix.Open(fmt.Sprintf("/dev/pts/%d", n), unix.O_RDWR|unix.O_NOCTTY, 0)
-	if err != nil {
-		_ = unix.Close(masterFD)
-		return nil, nil, err
-	}
-	return os.NewFile(uintptr(masterFD), "pty-master"), os.NewFile(uintptr(slaveFD), "pty-slave"), nil
+	return pty.Open()
 }
 
-func makeRaw(fd int) (*unix.Termios, error) {
-	t, err := unix.IoctlGetTermios(fd, unix.TCGETS)
-	if err != nil {
-		return nil, err
-	}
-	raw := *t
-	raw.Iflag &^= unix.IGNBRK | unix.BRKINT | unix.PARMRK | unix.ISTRIP | unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON | unix.IXOFF
-	raw.Oflag &^= unix.OPOST
-	raw.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG | unix.IEXTEN
-	raw.Cflag &^= unix.CSIZE | unix.PARENB
-	raw.Cflag |= unix.CS8
-	raw.Cc[unix.VMIN] = 1
-	raw.Cc[unix.VTIME] = 0
-	if err := unix.IoctlSetTermios(fd, unix.TCSETS, &raw); err != nil {
-		return nil, err
-	}
-	return t, nil
+func makeRaw(fd int) (*term.State, error) {
+	return term.MakeRaw(fd)
 }
 
-func restoreTerm(fd int, term *unix.Termios) {
-	_ = unix.IoctlSetTermios(fd, unix.TCSETS, term)
+func restoreTerm(fd int, state *term.State) {
+	_ = term.Restore(fd, state)
 	fmt.Print("\x1b[?25h")
 }
 
 func sendWindowSize(w io.Writer) error {
-	ws, err := unix.IoctlGetWinsize(0, unix.TIOCGWINSZ)
+	width, height, err := term.GetSize(0)
 	if err != nil {
 		return nil
 	}
 	payload := make([]byte, 8)
-	binary.BigEndian.PutUint32(payload[:4], uint32(ws.Row))
-	binary.BigEndian.PutUint32(payload[4:], uint32(ws.Col))
+	binary.BigEndian.PutUint32(payload[:4], uint32(height))
+	binary.BigEndian.PutUint32(payload[4:], uint32(width))
 	return writeFrame(w, frameResize, payload)
 }
 

@@ -25,6 +25,7 @@ di
 - `d install`：从源码安装到 `~/.local/bin`
 - 默认保留终端鼠标选择/复制能力
 - 纯 Go 实现，不依赖 `dtach`
+- 支持 Linux 和 macOS
 
 ## 安装
 
@@ -45,6 +46,13 @@ go build -o di .
 ```
 
 确保 `~/.local/bin` 在 `PATH` 里。
+
+交叉编译 macOS：
+
+```sh
+GOOS=darwin GOARCH=arm64 go build -o di-darwin-arm64 .
+GOOS=darwin GOARCH=amd64 go build -o di-darwin-amd64 .
+```
 
 ## 用法
 
