@@ -27,6 +27,7 @@ const (
 	frameInput       = 'i'
 	frameResize      = 'w'
 	frameDetachAll   = 'D'
+	dialTimeout      = 200 * time.Millisecond
 )
 
 type sessionMeta struct {
@@ -98,10 +99,7 @@ func usage() string {
 }
 
 func installSelf() error {
-	if _, err := exec.LookPath("go"); err != nil {
-		return errors.New("d install: go is not installed")
-	}
-	root, err := sourceRoot()
+	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
@@ -114,28 +112,41 @@ func installSelf() error {
 		return err
 	}
 
-	tmp, err := os.CreateTemp(binDir, ".d-build-*")
+	src, err := os.Open(exe)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	srcInfo, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	if srcInfo.IsDir() {
+		return fmt.Errorf("d install: executable is a directory: %s", exe)
+	}
+
+	tmp, err := os.CreateTemp(binDir, ".d-install-*")
 	if err != nil {
 		return err
 	}
 	tmpPath := tmp.Name()
-	_ = tmp.Close()
 	defer os.Remove(tmpPath)
 
-	cmd := exec.Command("go", "build", "-o", tmpPath, ".")
-	cmd.Dir = root
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if _, err := io.Copy(tmp, src); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, srcInfo.Mode().Perm()|0o755); err != nil {
 		return err
 	}
 
 	dPath := filepath.Join(binDir, "d")
 	diPath := filepath.Join(binDir, "di")
 	if err := os.Rename(tmpPath, dPath); err != nil {
-		return err
-	}
-	if err := os.Chmod(dPath, 0o755); err != nil {
 		return err
 	}
 	_ = os.Remove(diPath)
@@ -145,43 +156,6 @@ func installSelf() error {
 	fmt.Printf("installed %s\n", dPath)
 	fmt.Printf("linked %s -> %s\n", diPath, dPath)
 	return nil
-}
-
-func sourceRoot() (string, error) {
-	if cwd, err := os.Getwd(); err == nil && hasProjectFiles(cwd) {
-		return cwd, nil
-	}
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		for {
-			if hasProjectFiles(dir) {
-				return dir, nil
-			}
-			next := filepath.Dir(dir)
-			if next == dir {
-				break
-			}
-			dir = next
-		}
-	}
-	home, err := os.UserHomeDir()
-	if err == nil {
-		root := filepath.Join(home, "pj", "di")
-		if hasProjectFiles(root) {
-			return root, nil
-		}
-	}
-	return "", errors.New("d install: run from the di source directory or place it at ~/pj/di")
-}
-
-func hasProjectFiles(dir string) bool {
-	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
-		return false
-	}
-	if _, err := os.Stat(filepath.Join(dir, "main.go")); err != nil {
-		return false
-	}
-	return true
 }
 
 func pickAndAttach() error {
@@ -252,7 +226,7 @@ func (s sessionInfo) displayLine() string {
 	if cmd == "" {
 		cmd = name
 	}
-	return fmt.Sprintf("%s\t%-32s\t%-56s\t%s", s.Sock, name, pwd, cmd)
+	return fmt.Sprintf("%s\t%-56s\t%-56s\t%s", s.Sock, pwd, cmd, name)
 }
 
 func allSessions() ([]sessionInfo, error) {
@@ -271,6 +245,10 @@ func allSessions() ([]sessionInfo, error) {
 	for _, e := range entries {
 		path := filepath.Join(dir, e.Name())
 		if strings.HasSuffix(e.Name(), ".sock") && isSocket(path) {
+			if !sessionReachable(path) {
+				removeSessionFiles(path)
+				continue
+			}
 			sessions = append(sessions, sessionInfo{Sock: path, Meta: readSessionMeta(path)})
 		}
 	}
@@ -288,7 +266,7 @@ func listSessions() error {
 		if name == "" {
 			name = strings.TrimSuffix(filepath.Base(session.Sock), ".sock")
 		}
-		fmt.Printf("%-32s\t%-56s\t%s\n", name, meta.PWD, strings.Join(meta.Command, " "))
+		fmt.Printf("%-56s\t%-56s\t%s\n", meta.PWD, strings.Join(meta.Command, " "), name)
 	}
 	return nil
 }
@@ -321,6 +299,11 @@ func uniqueSocketPath(dir, base string) string {
 
 func metaPath(sock string) string {
 	return strings.TrimSuffix(sock, ".sock") + ".json"
+}
+
+func removeSessionFiles(sock string) {
+	_ = os.Remove(sock)
+	_ = os.Remove(metaPath(sock))
 }
 
 func writeSessionMeta(sock string, args []string) error {
@@ -359,6 +342,21 @@ func isSocket(path string) bool {
 	return info.Mode()&os.ModeSocket != 0
 }
 
+func dialSession(sock string) (net.Conn, error) {
+	var dialer net.Dialer
+	dialer.Timeout = dialTimeout
+	return dialer.Dial("unix", sock)
+}
+
+func sessionReachable(sock string) bool {
+	conn, err := dialSession(sock)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 func startServer(sock string, args []string) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -392,8 +390,9 @@ func waitSocket(sock string, timeout time.Duration) error {
 }
 
 func attach(sock string) error {
-	conn, err := net.Dial("unix", sock)
+	conn, err := dialSession(sock)
 	if err != nil {
+		removeSessionFiles(sock)
 		return err
 	}
 	defer conn.Close()
@@ -654,8 +653,9 @@ func readFrame(r io.Reader) (byte, []byte, error) {
 }
 
 func detachSession(sock string) error {
-	conn, err := net.Dial("unix", sock)
+	conn, err := dialSession(sock)
 	if err != nil {
+		removeSessionFiles(sock)
 		return err
 	}
 	defer conn.Close()
