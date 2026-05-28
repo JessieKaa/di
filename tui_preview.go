@@ -50,10 +50,11 @@ func renderPreview(meta sessionMeta, content string, width, height int) string {
 	age := formatAge(meta.StartedAt)
 
 	header := stylePreviewTitle.Render(padOrTruncate(name, innerW))
+	pwdLine := styleDim.Render(padOrTruncate(meta.PWD, innerW))
 	cmdLine := styleDim.Render(padOrTruncate(cmd+"  "+age, innerW))
 	sep := styleSeparator.Render(strings.Repeat("─", innerW))
 
-	availableH := innerH - 3
+	availableH := innerH - 4
 	if availableH < 1 {
 		availableH = 1
 	}
@@ -62,6 +63,8 @@ func renderPreview(meta sessionMeta, content string, width, height int) string {
 
 	var b strings.Builder
 	b.WriteString(header)
+	b.WriteByte('\n')
+	b.WriteString(pwdLine)
 	b.WriteByte('\n')
 	b.WriteString(cmdLine)
 	b.WriteByte('\n')
@@ -318,6 +321,13 @@ func clamp(v, lo, hi int) int {
 // --- preview rendering ---
 
 func getLastVisibleLines(raw string, maxLines, width int) []string {
+	// Only process the tail of history to avoid replaying megabytes of
+	// stale screen redraws. ~80KB is roughly 10 screenfuls at 80x24.
+	const tailMax = 80 * 1024
+	if len(raw) > tailMax {
+		raw = raw[len(raw)-tailMax:]
+	}
+
 	const (
 		screenW = 300
 		screenH = 100

@@ -3,8 +3,11 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var reNameSuffix = regexp.MustCompile(`-\d+-\d+$`)
 
 func renderSessionList(sessions []sessionInfo, cursor int, width, height int, focused bool) string {
 	if width < 4 || height < 4 {
@@ -45,31 +48,30 @@ func renderSessionRow(s sessionInfo, selected bool, width int) string {
 	if name == "" {
 		name = strings.TrimSuffix(filepath.Base(s.Sock), ".sock")
 	}
+	name = reNameSuffix.ReplaceAllString(name, "")
+
 	pwd := s.Meta.PWD
 	if pwd == "" {
 		pwd = "-"
+	} else {
+		pwd = filepath.Base(pwd)
+		if pwd == "" || pwd == "/" {
+			pwd = "/"
+		}
 	}
-	home := homeDir()
-	if home != "" && strings.HasPrefix(pwd, home) {
-		pwd = "~" + strings.TrimPrefix(pwd, home)
-	}
-	cmd := strings.Join(s.Meta.Command, " ")
-	if cmd == "" {
-		cmd = name
-	}
+
 	age := formatAge(s.Meta.StartedAt)
 
-	cursor := "  "
+	cur := "  "
 	if selected {
-		cursor = styleCursor.Render("▶")
+		cur = styleCursor.Render("▶")
 	}
 
 	namePart := name
 	pwdPart := styleDim.Render(pwd)
-	cmdPart := styleDim.Render(cmd)
 	agePart := styleDim.Render(age)
 
-	row := cursor + " " + namePart + "  " + pwdPart + "  " + cmdPart + "  " + agePart
+	row := cur + " " + namePart + "  " + pwdPart + "  " + agePart
 
 	if selected {
 		row = styleSelected.Render(padOrTruncate(row, width))
@@ -77,6 +79,19 @@ func renderSessionRow(s sessionInfo, selected bool, width int) string {
 		row = padOrTruncate(row, width)
 	}
 	return row
+}
+
+func shortenPath(pwd string) string {
+	home := homeDir()
+	if home != "" && strings.HasPrefix(pwd, home) {
+		pwd = "~" + strings.TrimPrefix(pwd, home)
+	}
+	parts := strings.Split(strings.TrimPrefix(pwd, "~"), "/")
+	if len(parts) <= 2 {
+		return pwd
+	}
+	// Show ".../parent/current"
+	return "~/" + "..." + "/" + parts[len(parts)-2] + "/" + parts[len(parts)-1]
 }
 
 func homeDir() string {

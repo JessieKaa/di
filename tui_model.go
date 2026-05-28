@@ -187,7 +187,7 @@ func tickSessions() tea.Cmd {
 }
 
 func tickPreview() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 		return tickPreviewMsg{}
 	})
 }
