@@ -68,6 +68,29 @@ di
 
 `di` 默认会显示一个编号列表，让你选择 session。即使在同一个目录里重复执行同一个命令，也会创建不同的 session。
 
+### TUI 模式
+
+`di tui` 提供一个终端界面，左侧显示 session 列表，右侧实时预览选中 session 的输出（每 500ms 刷新）。
+
+```sh
+di tui
+```
+
+快捷键：
+
+| 按键 | 功能 |
+|------|------|
+| `j` / `↓` | 向下移动 |
+| `k` / `↑` | 向上移动 |
+| `g` | 跳到第一个 session |
+| `G` | 跳到最后一个 session |
+| `Enter` | 进入选中的 session |
+| `q` | 退出 TUI |
+
+Enter 进入 session 后，TUI 退出，`attach()` 接管终端。Ctrl-] 断开后回到 shell，需要重新运行 `di tui` 才能再次浏览。
+
+注意：TUI 预览的是 PTY 原始输出（含 ANSI 转义），对 shell/CLI 程序效果较好，全屏应用（如 vim）为 best-effort。
+
 如果想用 `fzf` 选择器：
 
 ```sh
@@ -104,4 +127,4 @@ GOOS=darwin GOARCH=amd64 go build -o di-darwin-amd64 .
 
 ## 说明
 
-`di` 解决的是“终端断开后重新进入”的问题，不是 checkpoint 工具；它不会保存进程内存、文件系统快照或网络连接状态。
+`di` 解决的是”终端断开后重新进入”的问题，不是 checkpoint 工具；它不会保存进程内存、文件系统快照或网络连接状态。

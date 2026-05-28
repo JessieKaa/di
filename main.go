@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
 )
 
@@ -28,6 +29,8 @@ const (
 	frameInput          = 'i'
 	frameResize         = 'w'
 	frameDetachAll      = 'D'
+	frameHistoryReq     = 'H'
+	frameHistoryResp    = 'h'
 	dialTimeout         = 200 * time.Millisecond
 	postExitAttachGrace = 2 * time.Second
 )
@@ -50,7 +53,11 @@ func main() {
 	} else if len(os.Args) > 1 && os.Args[1] == "install" {
 		err = installSelf()
 	} else if filepath.Base(os.Args[0]) == "di" {
-		err = pickAndAttach()
+		if len(os.Args) > 1 && os.Args[1] == "tui" {
+			err = runTUI()
+		} else {
+			err = pickAndAttach()
+		}
 	} else {
 		err = runD(os.Args[1:])
 	}
@@ -128,6 +135,7 @@ func helpText() string {
 Usage:
   d <command> [args...]       start a new detachable session and attach to it
   di                          pick an existing session and attach to it
+  di tui                      TUI session browser with live preview
   d --list                    list active sessions
   d --detach <name>           detach all clients from a session
   d install                   install the current binary to ~/.local/bin/d and link di
@@ -230,6 +238,25 @@ func pickAndAttach() error {
 		return nil
 	}
 	return attach(sock)
+}
+
+func runTUI() error {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return errors.New("di tui: requires an interactive terminal (TTY)")
+	}
+	p := tea.NewProgram(newTUIModel(), tea.WithAltScreen())
+	m, err := p.Run()
+	if err != nil {
+		return fmt.Errorf("di tui: %w", err)
+	}
+	tm, ok := m.(tuiModel)
+	if !ok {
+		return fmt.Errorf("di tui: unexpected model type")
+	}
+	if tm.attachSock != "" {
+		return attach(tm.attachSock)
+	}
+	return nil
 }
 
 func pickWithFZF(sessions []sessionInfo) (string, error) {
@@ -670,11 +697,52 @@ func runServer(args []string) error {
 		if err != nil {
 			return nil
 		}
-		if server.add(conn) {
-			go server.handle(conn)
+		br := bufio.NewReader(conn)
+		conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		peek, err := br.Peek(1)
+		conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+				conn.Close()
+				continue
+			}
+		}
+		if err == nil && len(peek) == 1 && peek[0] == frameHistoryReq {
+			conn.SetReadDeadline(time.Now().Add(dialTimeout))
+			reqTyp, _, reqErr := readFrame(br)
+			conn.SetReadDeadline(time.Time{})
+			if reqErr != nil || reqTyp != frameHistoryReq {
+				conn.Close()
+				continue
+			}
+			server.mu.Lock()
+			history := append([]byte(nil), server.history...)
+			server.mu.Unlock()
+			_ = writeFrame(conn, frameHistoryResp, history)
+			conn.Close()
+			continue
+		}
+		if err == nil {
+			// Peek succeeded, use buffered reader to preserve peeked byte
+			wrapped := &readerConn{Conn: conn, reader: br}
+			if server.add(wrapped) {
+				go server.handle(wrapped)
+			}
+		} else {
+			// Timeout: use raw connection, bufio.Reader carries timeout error
+			if server.add(conn) {
+				go server.handle(conn)
+			}
 		}
 	}
 }
+
+type readerConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (rc *readerConn) Read(b []byte) (int, error) { return rc.reader.Read(b) }
 
 type ptyServer struct {
 	mu        sync.Mutex
