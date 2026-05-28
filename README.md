@@ -70,10 +70,12 @@ di
 
 ### TUI 模式
 
-`di tui` 提供一个终端界面，左侧显示 session 列表，右侧实时预览选中 session 的输出（每 500ms 刷新）。
+`di tui` 提供一个终端界面，左侧显示 session 列表，右侧实时预览选中 session 的输出（每 1s 刷新）。
 
 ```sh
-di tui
+di tui                              # 默认左右布局
+di tui --layout=vertical            # 上下布局
+di tui --no-preview                 # 隐藏预览，列表全屏
 ```
 
 快捷键：

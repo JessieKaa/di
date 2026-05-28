@@ -135,7 +135,8 @@ func helpText() string {
 Usage:
   d <command> [args...]       start a new detachable session and attach to it
   di                          pick an existing session and attach to it
-  di tui                      TUI session browser with live preview
+  di tui [--layout=horizontal|vertical] [--no-preview]
+                              TUI session browser with live preview
   d --list                    list active sessions
   d --detach <name>           detach all clients from a session
   d install                   install the current binary to ~/.local/bin/d and link di
@@ -241,10 +242,30 @@ func pickAndAttach() error {
 }
 
 func runTUI() error {
+	layout := "horizontal"
+	noPreview := false
+	args := os.Args[2:]
+	for _, arg := range args {
+		if arg == "--no-preview" {
+			noPreview = true
+		} else if strings.HasPrefix(arg, "--layout=") {
+			layout = strings.TrimPrefix(arg, "--layout=")
+			if layout != "horizontal" && layout != "vertical" {
+				return fmt.Errorf("di tui: invalid layout %q (use horizontal or vertical)", layout)
+			}
+		} else if arg == "--help" || arg == "-h" {
+			fmt.Print(helpText())
+			return nil
+		} else {
+			return fmt.Errorf("di tui: unknown argument %q", arg)
+		}
+	}
+
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return errors.New("di tui: requires an interactive terminal (TTY)")
 	}
-	p := tea.NewProgram(newTUIModel(), tea.WithAltScreen())
+
+	p := tea.NewProgram(newTUIModel(layout, noPreview), tea.WithAltScreen())
 	m, err := p.Run()
 	if err != nil {
 		return fmt.Errorf("di tui: %w", err)

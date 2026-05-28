@@ -40,6 +40,17 @@ func drawBorder(content string, width, height int, active bool) string {
 		Render(content)
 }
 
+func joinVertical(top, bottom string, width int) string {
+	topLines := strings.Split(top, "\n")
+	for i, line := range topLines {
+		lineW := ansi.StringWidth(line)
+		if lineW < width {
+			topLines[i] = line + strings.Repeat(" ", width-lineW)
+		}
+	}
+	return strings.Join(topLines, "\n") + "\n" + bottom
+}
+
 func joinHorizontalFixed(left, right string, leftW, totalW int) string {
 	leftLines := strings.Split(left, "\n")
 	rightLines := strings.Split(right, "\n")

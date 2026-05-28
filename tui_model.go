@@ -17,6 +17,8 @@ type tuiModel struct {
 	height      int
 	attachSock  string
 	quitting    bool
+	layout      string
+	noPreview   bool
 }
 
 type tickSessionsMsg struct{}
@@ -25,16 +27,16 @@ type sessionsLoadedMsg struct {
 	sessions []sessionInfo
 }
 
-func newTUIModel() tuiModel {
-	return tuiModel{}
+func newTUIModel(layout string, noPreview bool) tuiModel {
+	return tuiModel{layout: layout, noPreview: noPreview}
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(
-		loadSessions(),
-		tickSessions(),
-		tickPreview(),
-	)
+	cmds := []tea.Cmd{loadSessions(), tickSessions()}
+	if !m.noPreview {
+		cmds = append(cmds, tickPreview())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -104,6 +106,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickPreviewMsg:
+		if m.noPreview {
+			return m, nil
+		}
 		if len(m.sessions) > 0 && m.cursor >= 0 && m.cursor < len(m.sessions) {
 			sock := m.sessions[m.cursor].Sock
 			if sock != m.previewSock {
@@ -113,6 +118,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickPreview()
 
 	case previewLoadedMsg:
+		if m.noPreview {
+			return m, nil
+		}
 		if m.cursor >= 0 && m.cursor < len(m.sessions) && m.sessions[m.cursor].Sock == msg.sock {
 			m.preview = msg.content
 			m.previewSock = msg.sock
@@ -131,6 +139,68 @@ func (m tuiModel) View() string {
 		return "Loading..."
 	}
 
+	title := styleTitle.Render("di") + styleDim.Render(" sessions")
+	help := styleHelp.Render("j/k ↑/↓ navigate  enter attach  q quit")
+	panelH := m.height - 2
+	if panelH < 4 {
+		panelH = 4
+	}
+
+	if m.noPreview {
+		leftPanel := renderSessionList(m.sessions, m.cursor, m.width, panelH, true)
+		var b strings.Builder
+		b.WriteString(title)
+		remaining := m.width - ansi.StringWidth("di sessions")
+		if remaining > 0 {
+			b.WriteString(strings.Repeat(" ", remaining))
+		}
+		b.WriteByte('\n')
+		b.WriteString(leftPanel)
+		if m.height > 2 {
+			b.WriteByte('\n')
+			b.WriteString(help)
+		}
+		return b.String()
+	}
+
+	if m.layout == "vertical" {
+		topH := panelH * 40 / 100
+		if topH < 4 {
+			topH = 4
+		}
+		bottomH := panelH - topH
+		if bottomH < 4 {
+			bottomH = 4
+			topH = panelH - bottomH
+		}
+
+		topPanel := renderSessionList(m.sessions, m.cursor, m.width, topH, true)
+
+		var bottomContent string
+		if len(m.sessions) > 0 && m.cursor >= 0 && m.cursor < len(m.sessions) {
+			bottomContent = renderPreview(m.sessions[m.cursor].Meta, m.preview, m.width, bottomH)
+		} else {
+			bottomContent = styleNoSessions.Render("Select a session to preview")
+		}
+
+		joined := joinVertical(topPanel, bottomContent, m.width)
+
+		var b strings.Builder
+		b.WriteString(title)
+		remaining := m.width - ansi.StringWidth("di sessions")
+		if remaining > 0 {
+			b.WriteString(strings.Repeat(" ", remaining))
+		}
+		b.WriteByte('\n')
+		b.WriteString(joined)
+		if m.height > 2 {
+			b.WriteByte('\n')
+			b.WriteString(help)
+		}
+		return b.String()
+	}
+
+	// horizontal (default)
 	leftW := m.width * 40 / 100
 	if leftW < 20 {
 		leftW = 20
@@ -139,13 +209,6 @@ func (m tuiModel) View() string {
 	if rightW < 20 {
 		rightW = 20
 		leftW = m.width - rightW
-	}
-
-	title := styleTitle.Render("di") + styleDim.Render(" sessions")
-	help := styleHelp.Render("j/k ↑/↓ navigate  enter attach  q quit")
-	panelH := m.height - 2
-	if panelH < 4 {
-		panelH = 4
 	}
 
 	leftPanel := renderSessionList(m.sessions, m.cursor, leftW, panelH, true)
@@ -192,7 +255,7 @@ func tickSessions() tea.Cmd {
 }
 
 func tickPreview() tea.Cmd {
-	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		return tickPreviewMsg{}
 	})
 }
