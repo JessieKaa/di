@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,11 +24,12 @@ import (
 )
 
 const (
-	defaultDetachKey = "^]"
-	frameInput       = 'i'
-	frameResize      = 'w'
-	frameDetachAll   = 'D'
-	dialTimeout      = 200 * time.Millisecond
+	defaultDetachKey    = "^]"
+	frameInput          = 'i'
+	frameResize         = 'w'
+	frameDetachAll      = 'D'
+	dialTimeout         = 200 * time.Millisecond
+	postExitAttachGrace = 2 * time.Second
 )
 
 type sessionMeta struct {
@@ -83,6 +85,9 @@ func runD(args []string) error {
 		}
 		return detachSession(filepath.Join(dir, args[1]+".sock"))
 	}
+	if err := validateCommand(args[0]); err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -102,6 +107,13 @@ func runD(args []string) error {
 	return attach(sock)
 }
 
+func validateCommand(name string) error {
+	if _, err := exec.LookPath(name); err == nil {
+		return nil
+	}
+	return fmt.Errorf("d: command not found: %s (shell aliases/functions are not supported; use a real executable or run via `bash -lc`)", name)
+}
+
 func usage() string {
 	return "usage: d <command> [args...]\n       d install\n       d --list\n       d --detach <name>"
 }
@@ -115,7 +127,7 @@ func helpText() string {
 
 Usage:
   d <command> [args...]       start a new detachable session and attach to it
-  di                          pick an existing session with fzf and attach to it
+  di                          pick an existing session and attach to it
   d --list                    list active sessions
   d --detach <name>           detach all clients from a session
   d install                   install the current binary to ~/.local/bin/d and link di
@@ -128,7 +140,8 @@ Environment:
   D_DETACH=^B                 override the detach key
 
 Notes:
-  di requires fzf to pick sessions. Starting and listing sessions do not.
+  di uses a built-in picker by default.
+  DI_PICKER=fzf di           use fzf instead
 `
 }
 
@@ -193,9 +206,6 @@ func installSelf() error {
 }
 
 func pickAndAttach() error {
-	if _, err := exec.LookPath("fzf"); err != nil {
-		return errors.New("di: fzf is not installed")
-	}
 	sessions, err := allSessions()
 	if err != nil {
 		return err
@@ -203,32 +213,132 @@ func pickAndAttach() error {
 	if len(sessions) == 0 {
 		return errors.New("di: no sessions found")
 	}
+	if len(sessions) == 1 {
+		return attach(sessions[0].Sock)
+	}
+
+	var sock string
+	if os.Getenv("DI_PICKER") == "fzf" {
+		sock, err = pickWithFZF(sessions)
+	} else {
+		sock, err = pickWithTTY(sessions)
+	}
+	if err != nil {
+		return err
+	}
+	if sock == "" {
+		return nil
+	}
+	return attach(sock)
+}
+
+func pickWithFZF(sessions []sessionInfo) (string, error) {
+	if _, err := exec.LookPath("fzf"); err != nil {
+		return "", errors.New("di: fzf is not installed")
+	}
+	if !term.IsTerminal(int(os.Stderr.Fd())) {
+		return "", errors.New("di: fzf requires an interactive terminal (TTY)")
+	}
+
 	lines := make([]string, 0, len(sessions))
 	for _, session := range sessions {
 		lines = append(lines, session.displayLine())
 	}
-	cmd := exec.Command("fzf", "--prompt=di> ", "--height=40%", "--reverse", "--delimiter=\t", "--with-nth=2..")
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return "", fmt.Errorf("di: failed to open controlling terminal: %w", err)
+	}
+	defer tty.Close()
+
+	resultFile, err := os.CreateTemp("", "di-fzf-*")
+	if err != nil {
+		return "", err
+	}
+	resultPath := resultFile.Name()
+	if err := resultFile.Close(); err != nil {
+		_ = os.Remove(resultPath)
+		return "", err
+	}
+	defer os.Remove(resultPath)
+
+	cmd := exec.Command(
+		"fzf",
+		"--prompt=di> ",
+		"--height=40%",
+		"--reverse",
+		"--delimiter=\t",
+		"--with-nth=2..",
+		"--bind", fmt.Sprintf("enter:execute-silent(echo {1} > %s)+accept", shellQuote(resultPath)),
+	)
+	cmd.Stdout = tty
+	cmd.Stderr = tty
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return err
+		return "", err
 	}
 	go copyLines(stdin, lines)
-	out, err := cmd.Output()
-	if err != nil {
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	if err := cmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 130 {
-			return nil
+			return "", nil
 		}
-		return err
+		return "", err
 	}
-	selected := strings.TrimSpace(string(out))
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	selected := strings.TrimSpace(string(data))
 	if selected == "" {
-		return nil
+		return "", nil
 	}
-	fields := strings.Split(selected, "\t")
-	if len(fields) == 0 || fields[0] == "" {
-		return nil
+	return selected, nil
+}
+
+func pickWithTTY(sessions []sessionInfo) (string, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return "", errors.New("di: picker requires an interactive stdin")
 	}
-	return attach(fields[0])
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Fprintln(os.Stdout, "di sessions:")
+		for i, session := range sessions {
+			fmt.Fprintf(os.Stdout, "  [%d] %s\n", i+1, session.summaryLine())
+		}
+		fmt.Fprintf(os.Stdout, "select session [1-%d] (blank to cancel): ", len(sessions))
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return "", nil
+			}
+			return "", err
+		}
+		choice := strings.TrimSpace(line)
+		if choice == "" {
+			return "", nil
+		}
+
+		n, err := strconv.Atoi(choice)
+		if err == nil && n >= 1 && n <= len(sessions) {
+			return sessions[n-1].Sock, nil
+		}
+
+		for _, session := range sessions {
+			if choice == session.Meta.Name || choice == filepath.Base(session.Sock) {
+				return session.Sock, nil
+			}
+		}
+
+		fmt.Fprintln(os.Stdout, "invalid selection")
+	}
 }
 
 func sessionDir() (string, error) {
@@ -261,6 +371,22 @@ func (s sessionInfo) displayLine() string {
 		cmd = name
 	}
 	return fmt.Sprintf("%s\t%-56s\t%-56s\t%s", s.Sock, pwd, cmd, name)
+}
+
+func (s sessionInfo) summaryLine() string {
+	name := s.Meta.Name
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(s.Sock), ".sock")
+	}
+	pwd := s.Meta.PWD
+	if pwd == "" {
+		pwd = "-"
+	}
+	cmd := strings.Join(s.Meta.Command, " ")
+	if cmd == "" {
+		cmd = name
+	}
+	return fmt.Sprintf("%s | %s | %s", pwd, cmd, name)
 }
 
 func allSessions() ([]sessionInfo, error) {
@@ -520,12 +646,23 @@ func runServer(args []string) error {
 	}
 	_ = slave.Close()
 
-	server := &ptyServer{master: master, clients: map[net.Conn]struct{}{}}
+	server := &ptyServer{
+		master:   master,
+		clients:  map[net.Conn]struct{}{},
+		shutdown: make(chan struct{}),
+	}
 	go server.broadcastPTY()
 	go func() {
-		_ = cmd.Wait()
+		<-server.shutdown
 		_ = ln.Close()
-		_ = master.Close()
+	}()
+	go func() {
+		_ = cmd.Wait()
+		if server.markExited() {
+			server.requestShutdown()
+			return
+		}
+		time.AfterFunc(postExitAttachGrace, server.requestShutdown)
 	}()
 
 	for {
@@ -533,25 +670,42 @@ func runServer(args []string) error {
 		if err != nil {
 			return nil
 		}
-		server.add(conn)
-		go server.handle(conn)
+		if server.add(conn) {
+			go server.handle(conn)
+		}
 	}
 }
 
 type ptyServer struct {
-	mu      sync.Mutex
-	master  *os.File
-	clients map[net.Conn]struct{}
-	history []byte
+	mu        sync.Mutex
+	master    *os.File
+	clients   map[net.Conn]struct{}
+	history   []byte
+	exited    bool
+	hadClient bool
+	shutdown  chan struct{}
+	once      sync.Once
 }
 
-func (s *ptyServer) add(conn net.Conn) {
+func (s *ptyServer) add(conn net.Conn) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.clients[conn] = struct{}{}
-	if len(s.history) > 0 {
-		_, _ = conn.Write(s.history)
+	s.hadClient = true
+	history := append([]byte(nil), s.history...)
+	exited := s.exited
+	if !exited {
+		s.clients[conn] = struct{}{}
 	}
+	s.mu.Unlock()
+
+	if len(history) > 0 {
+		_, _ = conn.Write(history)
+	}
+	if exited {
+		_ = conn.Close()
+		s.requestShutdown()
+		return false
+	}
+	return true
 }
 
 func (s *ptyServer) remove(conn net.Conn) {
@@ -568,6 +722,19 @@ func (s *ptyServer) closeClients() {
 		_ = conn.Close()
 		delete(s.clients, conn)
 	}
+}
+
+func (s *ptyServer) markExited() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.exited = true
+	return s.hadClient
+}
+
+func (s *ptyServer) requestShutdown() {
+	s.once.Do(func() {
+		close(s.shutdown)
+	})
 }
 
 func (s *ptyServer) broadcastPTY() {
@@ -811,4 +978,8 @@ func copyLines(w io.WriteCloser, lines []string) {
 	for _, line := range lines {
 		fmt.Fprintln(bw, line)
 	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
