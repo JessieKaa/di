@@ -26,15 +26,15 @@ var (
 			Bold(true)
 
 	styleSelected = lipgloss.NewStyle().
-			Background(lipgloss.Color(colorSelected)).
-			Foreground(lipgloss.Color(colorHighlight))
+			Background(lipgloss.AdaptiveColor{Light: "#E0E7FF", Dark: colorSelected}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#312E81", Dark: colorHighlight})
 
 	styleDim = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorDimText))
 
 	styleFolder = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color(colorHighlight))
+			Foreground(lipgloss.AdaptiveColor{Light: "#7C3AED", Dark: colorHighlight})
 
 	styleHeader = lipgloss.NewStyle().
 			Bold(true).
