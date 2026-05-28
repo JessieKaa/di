@@ -67,11 +67,11 @@ func renderSessionRow(s sessionInfo, selected bool, width int) string {
 		cur = styleCursor.Render("▶")
 	}
 
-	namePart := name
-	pwdPart := styleDim.Render(pwd)
+	pwdPart := styleFolder.Render(pwd)
+	namePart := styleDim.Render(name)
 	agePart := styleDim.Render(age)
 
-	row := cur + " " + namePart + "  " + pwdPart + "  " + agePart
+	row := cur + " " + pwdPart + " " + namePart + "  " + agePart
 
 	if selected {
 		row = styleSelected.Render(padOrTruncate(row, width))

@@ -9,13 +9,14 @@ import (
 )
 
 type tuiModel struct {
-	sessions  []sessionInfo
-	cursor    int
-	preview   string
-	width     int
-	height    int
-	attachSock string
-	quitting  bool
+	sessions    []sessionInfo
+	cursor      int
+	preview     string
+	previewSock string
+	width       int
+	height      int
+	attachSock  string
+	quitting    bool
 }
 
 type tickSessionsMsg struct{}
@@ -104,13 +105,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickPreviewMsg:
 		if len(m.sessions) > 0 && m.cursor >= 0 && m.cursor < len(m.sessions) {
-			return m, fetchHistoryPreview(m.sessions[m.cursor].Sock)
+			sock := m.sessions[m.cursor].Sock
+			if sock != m.previewSock {
+				return m, fetchHistoryPreview(sock)
+			}
 		}
 		return m, tickPreview()
 
 	case previewLoadedMsg:
 		if m.cursor >= 0 && m.cursor < len(m.sessions) && m.sessions[m.cursor].Sock == msg.sock {
 			m.preview = msg.content
+			m.previewSock = msg.sock
 		}
 		return m, tickPreview()
 	}
@@ -181,13 +186,13 @@ func loadSessions() tea.Cmd {
 }
 
 func tickSessions() tea.Cmd {
-	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 		return tickSessionsMsg{}
 	})
 }
 
 func tickPreview() tea.Cmd {
-	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 		return tickPreviewMsg{}
 	})
 }

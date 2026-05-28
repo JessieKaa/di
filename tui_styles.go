@@ -32,6 +32,10 @@ var (
 	styleDim = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorDimText))
 
+	styleFolder = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color(colorHighlight))
+
 	styleHeader = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color(colorPrimary))
