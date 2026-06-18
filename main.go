@@ -88,9 +88,13 @@ func runD(args []string) error {
 		return listSessions()
 	case "--detach":
 		if len(args) < 2 {
-			return errors.New("usage: d --detach <name>")
+			return errors.New("usage: d --detach <name-or-id>")
 		}
-		return detachSession(filepath.Join(dir, args[1]+".sock"))
+		sock, err := resolveSessionSock(args[1])
+		if err != nil {
+			return err
+		}
+		return detachSession(sock)
 	}
 	if err := validateCommand(args[0]); err != nil {
 		return err
@@ -99,8 +103,9 @@ func runD(args []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	sock := uniqueSocketPath(dir, labelFor(args))
-	if err := writeSessionMeta(sock, args); err != nil {
+	displayName := labelFor(args)
+	sock := uniqueSocketPath(dir)
+	if err := writeSessionMeta(sock, displayName, args); err != nil {
 		return err
 	}
 	if err := startServer(sock, args); err != nil {
@@ -122,7 +127,7 @@ func validateCommand(name string) error {
 }
 
 func usage() string {
-	return "usage: d <command> [args...]\n       d install\n       d --list\n       d --detach <name>"
+	return "usage: d <command> [args...]\n       d install\n       d --list\n       d --detach <name-or-id>"
 }
 
 func isHelpArg(arg string) bool {
@@ -138,7 +143,7 @@ Usage:
   di tui [--layout=horizontal|vertical] [--no-preview]
                               TUI session browser with live preview
   d --list                    list active sessions
-  d --detach <name>           detach all clients from a session
+  d --detach <name-or-id>     detach all clients from a session
   d install                   install the current binary to ~/.local/bin/d and link di
   d --help, di --help         show this help
 
@@ -405,10 +410,14 @@ type sessionInfo struct {
 	Meta sessionMeta
 }
 
+func sessionShortID(sock string) string {
+	return strings.TrimSuffix(filepath.Base(sock), ".sock")
+}
+
 func (s sessionInfo) displayLine() string {
 	name := s.Meta.Name
 	if name == "" {
-		name = strings.TrimSuffix(filepath.Base(s.Sock), ".sock")
+		name = sessionShortID(s.Sock)
 	}
 	pwd := s.Meta.PWD
 	if pwd == "" {
@@ -418,13 +427,13 @@ func (s sessionInfo) displayLine() string {
 	if cmd == "" {
 		cmd = name
 	}
-	return fmt.Sprintf("%s\t%-56s\t%-56s\t%s", s.Sock, pwd, cmd, name)
+	return fmt.Sprintf("%s\t%-56s\t%-56s\t%s [%s]", s.Sock, pwd, cmd, name, sessionShortID(s.Sock))
 }
 
 func (s sessionInfo) summaryLine() string {
 	name := s.Meta.Name
 	if name == "" {
-		name = strings.TrimSuffix(filepath.Base(s.Sock), ".sock")
+		name = sessionShortID(s.Sock)
 	}
 	pwd := s.Meta.PWD
 	if pwd == "" {
@@ -434,7 +443,7 @@ func (s sessionInfo) summaryLine() string {
 	if cmd == "" {
 		cmd = name
 	}
-	return fmt.Sprintf("%s | %s | %s", pwd, cmd, name)
+	return fmt.Sprintf("%s | %s | %s [%s]", pwd, cmd, name, sessionShortID(s.Sock))
 }
 
 func allSessions() ([]sessionInfo, error) {
@@ -472,9 +481,9 @@ func listSessions() error {
 		meta := session.Meta
 		name := meta.Name
 		if name == "" {
-			name = strings.TrimSuffix(filepath.Base(session.Sock), ".sock")
+			name = sessionShortID(session.Sock)
 		}
-		fmt.Printf("%-56s\t%-56s\t%s\n", meta.PWD, strings.Join(meta.Command, " "), name)
+		fmt.Printf("%-56s\t%-56s\t%s\t[%s]\n", meta.PWD, strings.Join(meta.Command, " "), name, sessionShortID(session.Sock))
 	}
 	return nil
 }
@@ -489,10 +498,8 @@ func labelFor(args []string) string {
 	return label
 }
 
-func uniqueSocketPath(dir, base string) string {
-	if base == "" {
-		base = "session"
-	}
+func uniqueSocketPath(dir string) string {
+	const base = "s"
 	for i := 0; ; i++ {
 		name := fmt.Sprintf("%s-%d-%d", base, time.Now().UnixNano(), os.Getpid())
 		if i > 0 {
@@ -514,10 +521,10 @@ func removeSessionFiles(sock string) {
 	_ = os.Remove(metaPath(sock))
 }
 
-func writeSessionMeta(sock string, args []string) error {
+func writeSessionMeta(sock, displayName string, args []string) error {
 	pwd, _ := os.Getwd()
 	meta := sessionMeta{
-		Name:      strings.TrimSuffix(filepath.Base(sock), ".sock"),
+		Name:      displayName,
 		Command:   append([]string(nil), args...),
 		PWD:       pwd,
 		StartedAt: time.Now().Format(time.RFC3339),
@@ -540,6 +547,83 @@ func readSessionMeta(sock string) sessionMeta {
 		meta.Name = strings.TrimSuffix(filepath.Base(sock), ".sock")
 	}
 	return meta
+}
+
+func resolveSessionSock(query string) (string, error) {
+	sessions, err := allSessions()
+	if err != nil {
+		return "", err
+	}
+	if len(sessions) == 0 {
+		return "", errors.New("di: no sessions found")
+	}
+
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return "", errors.New("di: empty session name or id")
+	}
+
+	var exactIDMatches []sessionInfo
+	var exactNameMatches []sessionInfo
+	for _, session := range sessions {
+		shortID := sessionShortID(session.Sock)
+		if query == shortID || query == shortID+".sock" {
+			exactIDMatches = append(exactIDMatches, session)
+		}
+		if session.Meta.Name == query {
+			exactNameMatches = append(exactNameMatches, session)
+		}
+	}
+
+	if len(exactIDMatches) == 1 {
+		return exactIDMatches[0].Sock, nil
+	}
+	if len(exactIDMatches) > 1 {
+		return "", fmt.Errorf("di: multiple sessions matched id %q", query)
+	}
+	if len(exactNameMatches) == 1 {
+		return exactNameMatches[0].Sock, nil
+	}
+	if len(exactNameMatches) > 1 {
+		return "", ambiguousSessionError(query, exactNameMatches)
+	}
+
+	var prefixMatches []sessionInfo
+	for _, session := range sessions {
+		shortID := sessionShortID(session.Sock)
+		if strings.HasPrefix(shortID, query) || strings.HasPrefix(session.Meta.Name, query) {
+			prefixMatches = append(prefixMatches, session)
+		}
+	}
+	if len(prefixMatches) == 1 {
+		return prefixMatches[0].Sock, nil
+	}
+	if len(prefixMatches) > 1 {
+		return "", ambiguousSessionError(query, prefixMatches)
+	}
+
+	return "", fmt.Errorf("di: session not found: %s", query)
+}
+
+func ambiguousSessionError(query string, sessions []sessionInfo) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "di: multiple sessions matched %q:", query)
+	for _, session := range sessions {
+		name := session.Meta.Name
+		if name == "" {
+			name = sessionShortID(session.Sock)
+		}
+		pwd := session.Meta.PWD
+		if pwd == "" {
+			pwd = "-"
+		}
+		cmd := strings.Join(session.Meta.Command, " ")
+		if cmd == "" {
+			cmd = name
+		}
+		fmt.Fprintf(&b, "\n  %s [%s] %s | %s", name, sessionShortID(session.Sock), pwd, cmd)
+	}
+	return errors.New(b.String())
 }
 
 func isSocket(path string) bool {

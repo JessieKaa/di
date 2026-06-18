@@ -47,8 +47,8 @@ func renderSessionRow(s sessionInfo, selected bool, width int) string {
 	name := s.Meta.Name
 	if name == "" {
 		name = strings.TrimSuffix(filepath.Base(s.Sock), ".sock")
+		name = reNameSuffix.ReplaceAllString(name, "")
 	}
-	name = reNameSuffix.ReplaceAllString(name, "")
 
 	pwd := s.Meta.PWD
 	if pwd == "" {

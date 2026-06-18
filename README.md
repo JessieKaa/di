@@ -105,11 +105,16 @@ DI_PICKER=fzf di
 d --list
 ```
 
+列表会同时显示可读名称和短 id；当名称重复时，可以用短 id 精确操作。
+
 从另一个终端断开某个 attach 客户端：
 
 ```sh
 d --detach codex---yolo
+d --detach s-1718690000000000000-12345
 ```
+
+`d --detach` 同时支持按名称或短 id 匹配；如果名称重复，会提示你改用短 id。
 
 临时修改 detach 快捷键：
 
